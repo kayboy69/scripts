@@ -105,20 +105,67 @@ else
     psql -U postgres -d trim_connect -c "INSERT INTO cert VALUES ("${DOMAIN_ID}", '"${DOMAIN}"', '*.\"${DOMAIN}\",\"${DOMAIN}\"', ${CERT_CREATE_TT}, ${CERT_RENEW_TT}, '${ALGO_TYPE}', '${CERT_ISSUED_BY}', ${TT}, '由acme.sh自动生成的证书', 0, null, 'upload', null, '${DOMAIN_SSL_DIR}/\"${DOMAIN}\".key', '${DOMAIN_SSL_DIR}/\"${DOMAIN}\".crt', '${DOMAIN_SSL_DIR}/issuer_certificate.crt', 'suc', ${TT}, ${TT});" >/dev/null 2>&1 && echo -e "证书信息插入成功" || { echo -e "证书信息插入失败，脚本退出. . ."; exit 1; }
 fi
 
-# 更新飞牛OS NGINX 配置文件
+# 更新飞牛OS NGINX 配置文件 (使用 Python 优化版)
 \cp -rfL /usr/trim/etc/network_gateway_cert.conf /usr/trim/etc/network_gateway_cert.conf.${TT}.bak
-NETWORK_GATEWAY_CERT="{\"host\":\""${DOMAIN}"\",\"cert\":\"${DOMAIN_SSL_DIR}/fullchain.crt\",\"key\":\"${DOMAIN_SSL_DIR}/\"${DOMAIN}\".key\"},"
-grep -qE ""${DOMAIN}"" /usr/trim/etc/network_gateway_cert.conf
+
+python3 -c "
+import json
+import sys
+import os
+
+config_file = '/usr/trim/etc/network_gateway_cert.conf'
+domain = '${DOMAIN}'
+# 注意：这里使用 fullchain.crt 作为证书文件，与原脚本逻辑保持一致
+cert_path = '${DOMAIN_SSL_DIR}/fullchain.crt'
+key_path = '${DOMAIN_SSL_DIR}/${DOMAIN}.key'
+
+try:
+    # 读取配置文件，如果文件不存在或为空，初始化为空列表
+    if os.path.exists(config_file) and os.path.getsize(config_file) > 0:
+        with open(config_file, 'r') as f:
+            try:
+                data = json.load(f)
+                if not isinstance(data, list):
+                    data = []
+            except json.JSONDecodeError:
+                data = []
+    else:
+        data = []
+
+    # 查找并更新域名
+    found = False
+    for item in data:
+        if item.get('host') == domain:
+            item['cert'] = cert_path
+            item['key'] = key_path
+            found = True
+            print(f'Update: 域名 {domain} 证书路径已更新。')
+            break
+    
+    # 如果没找到，则追加新条目
+    if not found:
+        data.append({
+            'host': domain,
+            'cert': cert_path,
+            'key': key_path
+        })
+        print(f'Add: 新增域名 {domain} 配置。')
+
+    # 写入文件，使用缩进格式化，避免下次读取出错
+    with open(config_file, 'w') as f:
+        json.dump(data, f, indent=4)
+    
+except Exception as e:
+    print(f'Error: 处理配置文件失败 - {str(e)}')
+    sys.exit(1)
+"
+
 if [ $? -eq 0 ]; then
-    sed -i "s|{\"host\":.*\/usr\/.*\"${DOMAIN}\".*},|${NETWORK_GATEWAY_CERT}|g" /usr/trim/etc/network_gateway_cert.conf
+    echo -e "更新nginx配置成功"
 else
-    awk '{gsub(/^./,""); print}' /usr/trim/etc/network_gateway_cert.conf > /tmp/fn
-    sed -i "1i[${NETWORK_GATEWAY_CERT}" /tmp/fn
-    sed -i ':a;N;$!ba;s/\n//g' /tmp/fn
-    \cp -rfL /tmp/fn /usr/trim/etc/network_gateway_cert.conf
-    rm -rf /tmp/fn
+    echo -e "更新nginx配置失败，脚本退出. . ."
+    exit 1
 fi
-grep -qE "${DOMAIN_SSL_DIR}" /usr/trim/etc/network_gateway_cert.conf && echo -e "更新nginx配置成功" || { echo -e "更新nginx配置失败，脚本退出. . ."; exit 1; }
 
 # 飞牛OS删除无效证书
 find ${SSLS_DIR}/"${DOMAIN}"/ -mtime +90 -type d -exec rm -rf {} \; >/dev/null 2>&1
